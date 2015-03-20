@@ -3,10 +3,12 @@ from __future__ import with_statement
 
 from six import print_, iteritems, string_types
 from six.moves import xrange
+from six.moves.urllib.request import urlopen
 
 import decimal
 import errno
 import glob
+import json
 import os
 import re
 import shutil
@@ -41,6 +43,8 @@ class TimeoutError(Exception):
 # Groups: 1 = cf, 2 = tmp or none, 3 = suffix (Compacted or Data.db)
 _sstable_regexp = re.compile('(?P<keyspace>[^\s-]+)-(?P<cf>[^\s-]+)-(?P<tmp>tmp(link)?-)?(?P<version>[^\s-]+)-(?P<number>\d+)-(?P<suffix>[a-zA-Z]+)\.[a-zA-Z0-9]+$')
 
+JOLOKIA_JAR = os.path.join('lib', 'jolokia-jvm-1.2.3-agent.jar')
+
 class Node(object):
     """
     Provides interactions to a Cassandra node.
@@ -73,6 +77,7 @@ class Node(object):
         self.pid = None
         self.data_center = None
         self.workload = None
+        self.__jolokia_url = 'http://%s:8778/jolokia' % (binary_interface,)
         self.__config_options = {}
         self.__install_dir = None
         self.__global_log_level = None
@@ -926,6 +931,61 @@ class Node(object):
 
     def removeToken(self, token):
         self.nodetool("removeToken " + str(token))
+
+    def start_jolokia(self):
+        args = ('java',
+                '-jar', JOLOKIA_JAR,
+                '--host', self.network_interfaces['binary'],
+                'start', str(self.pid))
+        try:
+            subprocess.check_output(args, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError, exc:
+            print_("Failed to start jolokia agent: " + exc)
+            print_("Exit status was: " + exc.returncode)
+            print_("Output was: " + exc.output)
+
+    def stop_jolokia(self):
+        args = ('java',
+                '-jar', JOLOKIA_JAR,
+                'stop', str(self.pid))
+        try:
+            subprocess.check_output(args, stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError, exc:
+            print_("Failed to stop jolokia agent: " + exc)
+            print_("Exit status was: " + exc.returncode)
+            print_("Output was: " + exc.output)
+
+    def __query_jolokia(self, body):
+        request_data = json.dumps(body)
+        response = urlopen(self.__jolokia_url, data=request_data, timeout=10.0)
+        if response.code != 200:
+            raise Exception("Failed to query Jolokia agent; response code: %d; response: %s" % (response.code, response.readlines()))
+
+        return json.loads(response.readlines())
+
+    def read_jolokia(self, mbean, attribute, path):
+        body = {'type': 'read',
+                'mbean': mbean,
+                'attribute': attribute,
+                'path': path}
+        response = self.__query_jolokia(body)
+        return response['value']
+
+    def write_jolokia(self, mbean, attribute, path, value):
+        body = {'type': 'write',
+                'mbean': mbean,
+                'attribute': attribute,
+                'path': path,
+                'value': value}
+        self.__query_jolokia(body)
+
+    def exec_jolokia(self, mbean, operation, arguments):
+        body = {'type': 'exec',
+                'mbean': mbean,
+                'operation': operation,
+                'arguments': arguments}
+        response = self.__query_jolokia(body)
+        return response['value']
 
     def import_config_files(self):
         self._update_config()
